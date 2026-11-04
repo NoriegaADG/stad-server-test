@@ -1,4 +1,6 @@
 
+from collections.abc import Callable
+
 from fastapi import Depends, HTTPException, Request
 from jwt import InvalidTokenError
 from sqlalchemy import select
@@ -12,7 +14,6 @@ def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
-
     token = request.cookies.get("stad_access_token")
 
     if not token:
@@ -59,3 +60,30 @@ def get_current_user(
         )
 
     return user
+
+def require_password_changed(
+    user: User = Depends(get_current_user),
+) -> User:
+    if user.must_change_password:
+        raise HTTPException(
+            status_code=403,
+            detail="Password change required",
+        )
+
+    return user
+
+def require_roles(
+    *allowed_roles: str,
+) -> Callable:
+    def check_role(
+        user: User = Depends(require_password_changed),
+    ) -> User:
+        if user.role.code not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Insufficient permissions",
+            )
+
+        return user
+
+    return check_role

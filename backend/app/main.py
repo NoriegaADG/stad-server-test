@@ -2,6 +2,7 @@
 from fastapi import FastAPI, HTTPException
 
 from app.api.auth import router as auth_router
+from app.api.users import router as users_router
 from app.db import check_database_connection
 
 app = FastAPI(
@@ -13,6 +14,11 @@ app = FastAPI(
 app.include_router(
     auth_router,
     prefix="/api/v1/auth",
+)
+
+app.include_router(
+    users_router,
+    prefix="/api/v1",
 )
 
 @app.get("/api/v1/health", tags=["Health"])

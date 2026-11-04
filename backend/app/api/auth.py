@@ -28,6 +28,12 @@ from app.core.security import (
     verify_password,
 )
 
+from app.services.login_limiter import (
+    MAX_FAILED_ATTEMPTS,
+    count_recent_failures,
+    record_failed_login,
+)
+
 from app.db import get_db
 from app.models import User
 
@@ -114,6 +120,31 @@ def login(
 
     email = credentials.email.strip().lower()
 
+    if request.client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Client address unavailable",
+        )
+
+    ip_address = request.client.host
+
+    email_failures, ip_failures = count_recent_failures(
+        db,
+        email,
+        ip_address,
+    )
+
+    if (
+        email_failures >= MAX_FAILED_ATTEMPTS
+        or ip_failures >= MAX_FAILED_ATTEMPTS
+    ):
+        db.rollback()
+
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts",
+        )
+
     user = db.scalar(
         select(User).where(User.email == email)
     )
@@ -134,14 +165,35 @@ def login(
         or not password_valid
         or not user.is_active
     ):
+        record_failed_login(
+            db,
+            email,
+            ip_address,
+        )
+
+        if (
+            email_failures + 1 >= MAX_FAILED_ATTEMPTS
+            or ip_failures + 1 >= MAX_FAILED_ATTEMPTS
+        ):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many login attempts",
+            )
+
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials",
         )
 
+    user_id = user.id
+    token_version = user.token_version
+    must_change_password = user.must_change_password
+
+    db.rollback()
+
     token = create_access_token(
-        user_id=user.id,
-        token_version=user.token_version,
+        user_id=user_id,
+        token_version=token_version,
     )
 
     payload = decode_access_token(token)
@@ -168,10 +220,9 @@ def login(
 
     return {
         "message": "Login successful",
-        "must_change_password": (
-            user.must_change_password
-        ),
+        "must_change_password": must_change_password,
     }
+
 
 @router.get("/me")
 def get_my_profile(
