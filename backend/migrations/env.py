@@ -6,7 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.db import Base, DATABASE_URL
 
-from app.models import Role, User
+from app.models import Role, User, LoginAttempt
 
 config = context.config
 
