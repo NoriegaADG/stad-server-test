@@ -1,17 +1,20 @@
 
 from fastapi import FastAPI, HTTPException
+
+from app.api.auth import router as auth_router
 from app.db import check_database_connection
 
-
-# Configuración principal de STAD
 app = FastAPI(
     title="STAD API",
     description="Server Test Automation Dashboard",
     version="1.1.0",
 )
 
+app.include_router(
+    auth_router,
+    prefix="/api/v1/auth",
+)
 
-# Verifica que FastAPI esté funcionando
 @app.get("/api/v1/health", tags=["Health"])
 def health_check():
     return {
@@ -19,8 +22,6 @@ def health_check():
         "service": "stad-backend",
     }
 
-
-# Verifica la conexión con PostgreSQL
 @app.get("/api/v1/health/db", tags=["Health"])
 def database_health_check():
     try:

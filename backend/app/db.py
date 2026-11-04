@@ -1,9 +1,10 @@
 
 import os
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from collections.abc import Generator
 
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
@@ -18,10 +19,12 @@ SessionLocal = sessionmaker(
     expire_on_commit=False,
 )
 
-
 class Base(DeclarativeBase):
     pass
 
+def get_db() -> Generator[Session, None, None]:
+    with SessionLocal() as session:
+        yield session
 
 def check_database_connection() -> bool:
     with engine.connect() as connection:

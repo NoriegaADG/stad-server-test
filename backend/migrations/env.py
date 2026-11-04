@@ -6,6 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.db import Base, DATABASE_URL
 
+from app.models import Role, User
 
 config = context.config
 
@@ -23,6 +24,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_type=True,
     )
 
     with context.begin_transaction():
@@ -40,6 +42,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            compare_type=True,
         )
 
         with context.begin_transaction():

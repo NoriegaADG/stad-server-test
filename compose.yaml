@@ -8,6 +8,9 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+    volumes:
+      - ./backend/migrations/versions:/app/migrations/versions
     restart: unless-stopped
     depends_on:
       db:
