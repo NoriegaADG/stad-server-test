@@ -7,6 +7,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.models import LoginAttempt
+from app.services.audit_service import record_audit_event
 
 MAX_FAILED_ATTEMPTS = 5
 WINDOW_MINUTES = 15
@@ -68,12 +69,24 @@ def record_failed_login(
     email: str,
     ip_address: str,
 ) -> None:
+
     db.add(
         LoginAttempt(
             email=email,
             ip_address=ip_address,
             attempted_at=datetime.now(timezone.utc),
         )
+    )
+
+    record_audit_event(
+        db,
+        action="LOGIN_FAILED",
+        ip_address=ip_address,
+        entity_type="user",
+        details={
+            "attempted_email": email,
+            "reason": "authentication_failed",
+        },
     )
 
     db.commit()

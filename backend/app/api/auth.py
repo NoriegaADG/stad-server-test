@@ -10,10 +10,12 @@ from fastapi import (
 )
 from jwt import InvalidTokenError
 from pydantic import BaseModel, Field
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.services.audit_service import record_audit_event
 
 from app.core.csrf import (
     CSRF_COOKIE_NAME,
@@ -218,6 +220,20 @@ def login(
         payload["jti"],
     )
 
+    record_audit_event(
+        db,
+        action="LOGIN_SUCCESS",
+        user_id=user_id,
+        ip_address=ip_address,
+        entity_type="user",
+        entity_id=str(user_id),
+        details={
+            "authentication_method": "password",
+        },
+    )
+
+    db.commit()
+
     return {
         "message": "Login successful",
         "must_change_password": must_change_password,
@@ -279,6 +295,22 @@ def change_password(
 
     user.token_version += 1
 
+    record_audit_event(
+        db,
+        action="PASSWORD_CHANGED",
+        user_id=user.id,
+        ip_address=(
+            request.client.host
+            if request.client is not None
+            else None
+        ),
+        entity_type="user",
+        entity_id=str(user.id),
+        details={
+            "method": "self_service",
+        },
+    )
+
     db.commit()
 
     clear_session_cookies(response)
@@ -293,12 +325,27 @@ def logout(
     request: Request,
     response: Response,
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-
     require_csrf(
         request,
         csrf_session_id(request),
     )
+
+    record_audit_event(
+        db,
+        action="LOGOUT",
+        user_id=user.id,
+        ip_address=(
+            request.client.host
+            if request.client is not None
+            else None
+        ),
+        entity_type="user",
+        entity_id=str(user.id),
+    )
+
+    db.commit()
 
     clear_session_cookies(response)
 
