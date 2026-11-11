@@ -1,0 +1,40 @@
+
+name: STAD Backend Tests
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    name: Pytest and PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Generate test credentials
+        run: |
+          echo "STAD_TEST_DB_PASSWORD=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "JWT_SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
+      - name: Check Docker Compose
+        run: docker compose version
+
+      - name: Run backend tests
+        run: |
+          docker compose -f compose.test.yaml run --rm --build tests
