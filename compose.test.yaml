@@ -1,0 +1,34 @@
+
+services:
+  db_test:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: stad_test
+      POSTGRES_USER: stad_test
+      POSTGRES_PASSWORD: ${STAD_TEST_DB_PASSWORD:?Test password required}
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U stad_test -d stad_test
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  tests:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: "postgresql+psycopg://stad_test:${STAD_TEST_DB_PASSWORD}@db_test:5432/stad_test"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT secret required}
+    volumes:
+      - ./backend/tests:/app/tests:ro
+    depends_on:
+      db_test:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - alembic upgrade head && python -m pytest -q tests
