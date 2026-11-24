@@ -1,9 +1,11 @@
-
 from uuid import uuid4
 
 import pytest
+import hashlib
+
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+
+from sqlalchemy import delete, func, select
 
 from app.core.security import (
     create_access_token,
@@ -14,9 +16,18 @@ from app.generators.synthetic_log_generator import (
     generate_synthetic_log,
 )
 from app.main import app
-from app.models import Role, User
+from app.models import (
+    AuditLog,
+    Role,
+    TestExecution as ExecutionRecord,
+    User,
+)
+
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 UPLOAD_URL = "/api/v1/logs/upload"
+
 
 @pytest.fixture
 def make_token():
@@ -62,6 +73,19 @@ def make_token():
 
     with SessionLocal() as db:
         for user_id in created_ids:
+            db.execute(
+                delete(AuditLog).where(
+                    AuditLog.user_id == user_id
+                )
+            )
+
+            db.execute(
+                delete(ExecutionRecord).where(
+                    ExecutionRecord.uploaded_by_user_id
+                    == user_id
+                )
+            )
+
             user = db.get(User, user_id)
 
             if user is not None:
@@ -85,11 +109,11 @@ def csrf_headers(client: TestClient) -> dict:
         "X-CSRF-Token": response.json()["csrf_token"]
     }
 
+
 @pytest.mark.parametrize(
     "role_code",
     ["ADMIN", "ENGINEER"],
 )
-
 def test_upload_allowed_roles(make_token, role_code):
     token = make_token(role_code)
 
@@ -111,14 +135,16 @@ def test_upload_allowed_roles(make_token, role_code):
             headers=csrf_headers(client),
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 201
 
     data = response.json()
 
     assert data["node_name"] == "NODE0001"
     assert data["result"] == "PASS"
     assert data["duration_seconds"] == 120.0
-    assert data["saved"] is False
+    assert data["saved"] is True
+    assert isinstance(data["id"], int)
+    assert data["id"] > 0
     assert len(data["sha256"]) == 64
 
 
@@ -193,11 +219,10 @@ def test_upload_requires_csrf(make_token):
         ("sample.log", b"\xff\xfe\xff"),
     ],
 )
-
 def test_upload_rejects_invalid_files(
-    make_token,
-    filename,
-    content,
+        make_token,
+        filename,
+        content,
 ):
     token = make_token("ENGINEER")
 
@@ -222,8 +247,8 @@ def test_upload_rejects_invalid_files(
 
 
 def test_upload_rejects_large_file(
-    make_token,
-    monkeypatch,
+        make_token,
+        monkeypatch,
 ):
     monkeypatch.setattr(
         "app.api.logs.MAX_LOG_FILE_BYTES",
@@ -267,3 +292,175 @@ def test_upload_requires_file(make_token):
         )
 
     assert response.status_code == 422
+
+
+def test_upload_duplicate_returns_409(make_token):
+    token = make_token("ENGINEER")
+
+    with TestClient(app) as client:
+        client.cookies.set(
+            "stad_access_token",
+            token,
+        )
+
+        headers = csrf_headers(client)
+
+        files = {
+            "file": (
+                "duplicate.log",
+                valid_content(),
+                "text/plain",
+            )
+        }
+
+        first = client.post(
+            UPLOAD_URL,
+            files=files,
+            headers=headers,
+        )
+
+        second = client.post(
+            UPLOAD_URL,
+            files=files,
+            headers=headers,
+        )
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+
+    assert second.json()["detail"] == (
+        "A log with this SHA-256 already exists"
+    )
+
+
+def test_upload_incomplete_execution(make_token):
+    token = make_token("ENGINEER")
+
+    content = generate_synthetic_log(
+        result="INCOMPLETE",
+        node_name="NODE0004",
+    ).encode("utf-8")
+
+    with TestClient(app) as client:
+        client.cookies.set(
+            "stad_access_token",
+            token,
+        )
+
+        response = client.post(
+            UPLOAD_URL,
+            files={
+                "file": (
+                    "NODE0004_incomplete.log",
+                    content,
+                    "text/plain",
+                )
+            },
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+
+    data = response.json()
+
+    assert data["result"] == "INCOMPLETE"
+    assert data["finished_at"] is None
+    assert data["duration_seconds"] is None
+    assert data["saved"] is True
+
+
+def test_concurrent_upload_same_log_saves_once(make_token):
+    token = make_token("ENGINEER")
+
+    node_name = f"NODE{uuid4().hex[:12]}"
+
+    content = generate_synthetic_log(
+        result="PASS",
+        node_name=node_name,
+    ).encode("utf-8")
+
+    expected_sha256 = hashlib.sha256(
+        content
+    ).hexdigest()
+
+    barrier = Barrier(2)
+
+    def upload_once():
+        with TestClient(app) as client:
+            client.cookies.set(
+                "stad_access_token",
+                token,
+            )
+
+            headers = csrf_headers(client)
+
+            barrier.wait(timeout=15)
+
+            response = client.post(
+                UPLOAD_URL,
+                files={
+                    "file": (
+                        "concurrent.log",
+                        content,
+                        "text/plain",
+                    )
+                },
+                headers=headers,
+            )
+
+            return response.status_code, response.json()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(upload_once)
+        second = executor.submit(upload_once)
+
+        results = [
+            first.result(timeout=30),
+            second.result(timeout=30),
+        ]
+
+    statuses = sorted(
+        status for status, _ in results
+    )
+
+    assert statuses == [201, 409]
+
+    created = next(
+        body
+        for status, body in results
+        if status == 201
+    )
+
+    conflict = next(
+        body
+        for status, body in results
+        if status == 409
+    )
+
+    assert created["saved"] is True
+    assert created["sha256"] == expected_sha256
+    assert conflict["detail"] == (
+        "A log with this SHA-256 already exists"
+    )
+
+    with SessionLocal() as db:
+        execution_count = db.scalar(
+            select(func.count())
+            .select_from(ExecutionRecord)
+            .where(
+                ExecutionRecord.sha256 == expected_sha256
+            )
+        )
+
+        audit_count = db.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(
+                AuditLog.action == "LOG_UPLOADED",
+                AuditLog.entity_type == "test_execution",
+                AuditLog.entity_id == str(created["id"]),
+            )
+        )
+
+    assert execution_count == 1
+    assert audit_count == 1

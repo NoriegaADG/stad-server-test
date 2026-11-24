@@ -9,26 +9,32 @@ from fastapi import (
     Request,
     UploadFile,
 )
-
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app.api.auth import csrf_session_id
 from app.api.deps import require_roles
 from app.core.csrf import require_csrf
+from app.db import get_db
+from app.models import User
+
 from app.services.log_upload_validator import (
     MAX_LOG_FILE_BYTES,
     validate_log_file,
+)
+from app.services.test_execution_service import (
+    DuplicateExecutionError,
+    save_test_execution,
 )
 
 router = APIRouter(
     prefix="/logs",
     tags=["Logs"],
-    dependencies=[
-        Depends(require_roles("ADMIN", "ENGINEER"))
-    ],
 )
 
+
 class LogUploadResponse(BaseModel):
+    id: int
     filename: str
     size_bytes: int
     sha256: str
@@ -42,11 +48,16 @@ class LogUploadResponse(BaseModel):
 @router.post(
     "/upload",
     response_model=LogUploadResponse,
+    status_code=201,
 )
 
-async def upload_log(
+def upload_log(
     request: Request,
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    uploader: User = Depends(
+        require_roles("ADMIN", "ENGINEER")
+    ),
 ):
     require_csrf(
         request,
@@ -54,11 +65,11 @@ async def upload_log(
     )
 
     try:
-        content = await file.read(
+        content = file.file.read(
             MAX_LOG_FILE_BYTES + 1
         )
     finally:
-        await file.close()
+        file.file.close()
 
     if len(content) > MAX_LOG_FILE_BYTES:
         raise HTTPException(
@@ -71,27 +82,41 @@ async def upload_log(
             filename=file.filename or "",
             content=content,
         )
-
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
             detail=str(exc),
         ) from exc
 
-    summary = validated.summary
+    ip_address = (
+        request.client.host
+        if request.client is not None
+        else None
+    )
+
+    try:
+        execution = save_test_execution(
+            db=db,
+            validated_log=validated,
+            uploaded_by_user_id=uploader.id,
+            ip_address=ip_address,
+        )
+
+    except DuplicateExecutionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A log with this SHA-256 already exists",
+        ) from exc
 
     return LogUploadResponse(
-        filename=validated.filename,
-        size_bytes=validated.size_bytes,
-        sha256=validated.sha256,
-        node_name=summary.node_name,
-        result=summary.result,
-        started_at=summary.started_at,
-        finished_at=summary.finished_at,
-        duration_seconds=(
-            summary.duration.total_seconds()
-            if summary.duration is not None
-            else None
-        ),
-        saved=False,
+        id=execution.id,
+        filename=execution.filename,
+        size_bytes=execution.file_size_bytes,
+        sha256=execution.sha256,
+        node_name=execution.node_name,
+        result=execution.result,
+        started_at=execution.started_at,
+        finished_at=execution.finished_at,
+        duration_seconds=execution.duration_seconds,
+        saved=True,
     )
