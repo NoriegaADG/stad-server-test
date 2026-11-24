@@ -5,6 +5,7 @@ from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 from app.db import check_database_connection
 from app.api.audit import router as audit_router
+from app.api.logs import router as logs_router
 
 app = FastAPI(
     title="STAD API",
@@ -25,6 +26,11 @@ app.include_router(
 app.include_router(
     audit_router,
     prefix="/api/v1"
+)
+
+app.include_router(
+    logs_router,
+    prefix="/api/v1",
 )
 
 @app.get("/api/v1/health", tags=["Health"])
