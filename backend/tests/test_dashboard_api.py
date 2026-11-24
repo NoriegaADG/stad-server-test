@@ -1,4 +1,3 @@
-
 import hashlib
 
 from datetime import datetime, timedelta, timezone
@@ -22,6 +21,7 @@ from app.models import (
 )
 
 SUMMARY_URL = "/api/v1/dashboard/summary"
+
 
 @pytest.fixture
 def dashboard_data():
@@ -87,7 +87,7 @@ def dashboard_data():
         executions = []
 
         for index, (result, duration) in enumerate(
-            zip(results, durations)
+                zip(results, durations)
         ):
             started_at = base_time + timedelta(
                 days=index
@@ -151,8 +151,8 @@ def dashboard_data():
 
 
 def get_summary(
-    token: str | None = None,
-    query: str = "",
+        token: str | None = None,
+        query: str = "",
 ):
     with TestClient(app) as client:
         if token is not None:
@@ -164,10 +164,45 @@ def get_summary(
         return client.get(SUMMARY_URL + query)
 
 
+NODES_URL = "/api/v1/dashboard/nodes"
+
+
+def get_nodes(
+        token: str | None = None,
+        query: str = "",
+):
+    with TestClient(app) as client:
+        if token is not None:
+            client.cookies.set(
+                "stad_access_token",
+                token,
+            )
+
+        return client.get(NODES_URL + query)
+
+
+TRENDS_URL = "/api/v1/dashboard/trends"
+
+
+def get_trends(
+        token: str | None = None,
+        query: str = "",
+):
+    with TestClient(app) as client:
+        if token is not None:
+            client.cookies.set(
+                "stad_access_token",
+                token,
+            )
+
+        return client.get(TRENDS_URL + query)
+
+
 def test_summary_requires_authentication():
     response = get_summary()
 
     assert response.status_code == 401
+
 
 @pytest.mark.parametrize(
     "role",
@@ -269,17 +304,365 @@ def test_summary_no_matching_records(dashboard_data):
         "?started_from=2026-11-11T10:00:00",
         "?started_to=2026-11-13T10:00:00",
         (
-            "?started_from=2026-11-14T00:00:00Z"
-            "&started_to=2026-11-13T00:00:00Z"
+                "?started_from=2026-11-14T00:00:00Z"
+                "&started_to=2026-11-13T00:00:00Z"
         ),
         "?started_from=invalid",
     ],
 )
 def test_summary_rejects_invalid_filters(
+        dashboard_data,
+        query,
+):
+    response = get_summary(
+        dashboard_data["tokens"]["ENGINEER"],
+        query,
+    )
+
+    assert response.status_code == 422
+
+
+def test_nodes_requires_authentication():
+    response = get_nodes()
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["ADMIN", "ENGINEER", "VIEWER"],
+)
+def test_nodes_allowed_roles(dashboard_data, role):
+    response = get_nodes(
+        dashboard_data["tokens"][role]
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_nodes"] == 2
+
+
+def test_nodes_grouping(dashboard_data):
+    response = get_nodes(
+        dashboard_data["tokens"]["ADMIN"]
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["total_nodes"] == 2
+    assert len(data["items"]) == 2
+
+    nodes = {
+        item["node_name"]: item
+        for item in data["items"]
+    }
+
+    node_a = nodes[dashboard_data["node_a"]]
+    node_b = nodes[dashboard_data["node_b"]]
+
+    assert node_a["total_executions"] == 3
+    assert node_a["pass_count"] == 2
+    assert node_a["fail_count"] == 1
+    assert node_a["error_count"] == 0
+    assert node_a["incomplete_count"] == 0
+    assert node_a["success_rate_percent"] == 66.67
+    assert node_a["average_duration_seconds"] == 120.0
+
+    assert node_b["total_executions"] == 2
+    assert node_b["pass_count"] == 0
+    assert node_b["fail_count"] == 0
+    assert node_b["error_count"] == 1
+    assert node_b["incomplete_count"] == 1
+    assert node_b["success_rate_percent"] == 0.0
+    assert node_b["average_duration_seconds"] == 240.0
+
+
+def test_nodes_pagination(dashboard_data):
+    token = dashboard_data["tokens"]["ENGINEER"]
+
+    first = get_nodes(
+        token,
+        "?page=1&page_size=1",
+    )
+
+    second = get_nodes(
+        token,
+        "?page=2&page_size=1",
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    assert first.json()["total_nodes"] == 2
+    assert second.json()["total_nodes"] == 2
+
+    names = sorted([
+        dashboard_data["node_a"],
+        dashboard_data["node_b"],
+    ])
+
+    assert first.json()["items"][0]["node_name"] == names[0]
+    assert second.json()["items"][0]["node_name"] == names[1]
+
+
+def test_nodes_filter_by_dates(dashboard_data):
+    response = get_nodes(
+        dashboard_data["tokens"]["VIEWER"],
+        "?started_from=2026-11-14T00:00:00Z"
+        "&started_to=2026-11-15T23:59:59Z",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_nodes"] == 1
+    assert len(data["items"]) == 1
+
+    node = data["items"][0]
+
+    assert node["node_name"] == dashboard_data["node_b"]
+    assert node["total_executions"] == 2
+    assert node["error_count"] == 1
+    assert node["incomplete_count"] == 1
+
+
+def test_nodes_incomplete_only(dashboard_data):
+    response = get_nodes(
+        dashboard_data["tokens"]["ADMIN"],
+        "?started_from=2026-11-15T00:00:00Z"
+        "&started_to=2026-11-15T23:59:59Z",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_nodes"] == 1
+
+    node = data["items"][0]
+
+    assert node["total_executions"] == 1
+    assert node["incomplete_count"] == 1
+    assert node["success_rate_percent"] == 0.0
+    assert node["average_duration_seconds"] is None
+
+
+def test_nodes_no_matching_records(dashboard_data):
+    response = get_nodes(
+        dashboard_data["tokens"]["VIEWER"],
+        "?started_from=2026-11-20T00:00:00Z",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_nodes"] == 0
+    assert data["items"] == []
+    assert data["page"] == 1
+    assert data["page_size"] == 25
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "?page=0",
+        "?page_size=101",
+        "?started_from=2026-11-11T10:00:00",
+        (
+                "?started_from=2026-11-15T00:00:00Z"
+                "&started_to=2026-11-14T00:00:00Z"
+        ),
+        "?started_from=invalid",
+    ],
+)
+def test_nodes_invalid_filters(
+        dashboard_data,
+        query,
+):
+    response = get_nodes(
+        dashboard_data["tokens"]["ENGINEER"],
+        query,
+    )
+
+    assert response.status_code == 422
+
+
+
+def test_trends_requires_authentication():
+    response = get_trends()
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["ADMIN", "ENGINEER", "VIEWER"],
+)
+def test_trends_allowed_roles(dashboard_data, role):
+    response = get_trends(
+        dashboard_data["tokens"][role]
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_days"] == 5
+
+
+def test_trends_grouping(dashboard_data):
+    response = get_trends(
+        dashboard_data["tokens"]["ADMIN"]
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_days"] == 5
+    assert len(data["items"]) == 5
+
+    expected_results = [
+        ("2026-11-11", "pass_count"),
+        ("2026-11-12", "pass_count"),
+        ("2026-11-13", "fail_count"),
+        ("2026-11-14", "error_count"),
+        ("2026-11-15", "incomplete_count"),
+    ]
+
+    for item, (day, result_field) in zip(
+        data["items"],
+        expected_results,
+    ):
+        assert item["day"] == day
+        assert item["total_executions"] == 1
+        assert item[result_field] == 1
+
+    assert data["items"][0]["success_rate_percent"] == 100.0
+    assert data["items"][2]["success_rate_percent"] == 0.0
+
+
+def test_trends_pagination(dashboard_data):
+    response = get_trends(
+        dashboard_data["tokens"]["ENGINEER"],
+        "?page=2&page_size=2",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_days"] == 5
+    assert data["page"] == 2
+    assert data["page_size"] == 2
+    assert len(data["items"]) == 2
+
+    assert data["items"][0]["day"] == "2026-11-13"
+    assert data["items"][1]["day"] == "2026-11-14"
+
+
+def test_trends_filter_by_node(dashboard_data):
+    node = dashboard_data["node_a"]
+
+    response = get_trends(
+        dashboard_data["tokens"]["VIEWER"],
+        f"?node_name={node}",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_days"] == 3
+    assert len(data["items"]) == 3
+
+    assert data["items"][0]["day"] == "2026-11-11"
+    assert data["items"][2]["day"] == "2026-11-13"
+
+    assert sum(
+        item["pass_count"] for item in data["items"]
+    ) == 2
+
+    assert sum(
+        item["fail_count"] for item in data["items"]
+    ) == 1
+
+
+def test_trends_filter_by_dates(dashboard_data):
+    response = get_trends(
+        dashboard_data["tokens"]["ENGINEER"],
+        "?started_from=2026-11-12T00:00:00Z"
+        "&started_to=2026-11-13T23:59:59Z",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_days"] == 2
+    assert len(data["items"]) == 2
+
+    assert data["items"][0]["day"] == "2026-11-12"
+    assert data["items"][0]["pass_count"] == 1
+
+    assert data["items"][1]["day"] == "2026-11-13"
+    assert data["items"][1]["fail_count"] == 1
+
+
+def test_trends_incomplete_execution(dashboard_data):
+    response = get_trends(
+        dashboard_data["tokens"]["ADMIN"],
+        "?started_from=2026-11-15T00:00:00Z"
+        "&started_to=2026-11-15T23:59:59Z",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_days"] == 1
+
+    item = data["items"][0]
+
+    assert item["day"] == "2026-11-15"
+    assert item["total_executions"] == 1
+    assert item["incomplete_count"] == 1
+    assert item["pass_count"] == 0
+    assert item["success_rate_percent"] == 0.0
+
+
+def test_trends_no_matching_records(dashboard_data):
+    response = get_trends(
+        dashboard_data["tokens"]["VIEWER"],
+        "?started_from=2026-11-20T00:00:00Z",
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total_days"] == 0
+    assert data["items"] == []
+    assert data["page"] == 1
+    assert data["page_size"] == 30
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "?page=0",
+        "?page_size=101",
+        "?started_from=2026-11-11T10:00:00",
+        "?started_from=invalid",
+        (
+            "?started_from=2026-11-15T00:00:00Z"
+            "&started_to=2026-11-14T00:00:00Z"
+        ),
+    ],
+)
+def test_trends_invalid_filters(
     dashboard_data,
     query,
 ):
-    response = get_summary(
+    response = get_trends(
         dashboard_data["tokens"]["ENGINEER"],
         query,
     )
