@@ -309,3 +309,92 @@ def reset_user_password(
             target_user.must_change_password
         ),
     )
+
+class DeactivateUserRequest(BaseModel):
+    reason: Literal[
+        "EMPLOYMENT_ENDED",
+        "ACCESS_NO_LONGER_REQUIRED",
+        "SECURITY",
+        "OTHER",
+    ]
+
+
+@router.patch(
+    "/{user_id}/deactivate",
+    response_model=UserListItem,
+)
+def deactivate_user(
+    payload: DeactivateUserRequest,
+    request: Request,
+    user_id: int = Path(ge=1),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_roles("ADMIN")),
+):
+    require_csrf(
+        request,
+        csrf_session_id(request),
+    )
+
+    target_user = db.scalar(
+        select(User)
+        .options(selectinload(User.role))
+        .where(User.id == user_id)
+        .with_for_update(of=User)
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    if target_user.role.code == "ADMIN":
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot deactivate administrators",
+        )
+
+    if not target_user.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="User is already inactive",
+        )
+
+    try:
+        target_user.is_active = False
+        target_user.token_version += 1
+
+        record_audit_event(
+            db,
+            action="USER_DEACTIVATED",
+            user_id=admin.id,
+            ip_address=(
+                request.client.host
+                if request.client is not None
+                else None
+            ),
+            entity_type="user",
+            entity_id=str(target_user.id),
+            details={
+                "email": target_user.email,
+                "role": target_user.role.code,
+                "reason": payload.reason,
+            },
+        )
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
+    return UserListItem(
+        id=target_user.id,
+        email=target_user.email,
+        full_name=target_user.full_name,
+        role=target_user.role.code,
+        is_active=target_user.is_active,
+        must_change_password=(
+            target_user.must_change_password
+        ),
+    )
