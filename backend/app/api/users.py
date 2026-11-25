@@ -19,7 +19,10 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.auth import csrf_session_id
 from app.api.deps import require_roles
 from app.core.csrf import require_csrf
-from app.core.security import hash_password
+from app.core.security import (
+    hash_password,
+    verify_password,
+)
 from app.db import get_db
 from app.models import Role, User
 from app.services.audit_service import record_audit_event
@@ -367,6 +370,117 @@ def deactivate_user(
         record_audit_event(
             db,
             action="USER_DEACTIVATED",
+            user_id=admin.id,
+            ip_address=(
+                request.client.host
+                if request.client is not None
+                else None
+            ),
+            entity_type="user",
+            entity_id=str(target_user.id),
+            details={
+                "email": target_user.email,
+                "role": target_user.role.code,
+                "reason": payload.reason,
+            },
+        )
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
+    return UserListItem(
+        id=target_user.id,
+        email=target_user.email,
+        full_name=target_user.full_name,
+        role=target_user.role.code,
+        is_active=target_user.is_active,
+        must_change_password=(
+            target_user.must_change_password
+        ),
+    )
+
+
+class ReactivateUserRequest(BaseModel):
+    temporary_password: str = Field(
+        min_length=12,
+        max_length=1024,
+    )
+
+    reason: Literal[
+        "REHIRE",
+        "ACCESS_RESTORED",
+        "OTHER",
+    ]
+
+@router.patch(
+    "/{user_id}/reactivate",
+    response_model=UserListItem,
+)
+def reactivate_user(
+    payload: ReactivateUserRequest,
+    request: Request,
+    user_id: int = Path(ge=1),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_roles("ADMIN")),
+):
+    require_csrf(
+        request,
+        csrf_session_id(request),
+    )
+
+    target_user = db.scalar(
+        select(User)
+        .options(selectinload(User.role))
+        .where(User.id == user_id)
+        .with_for_update(of=User)
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    if target_user.role.code == "ADMIN":
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot reactivate administrators",
+        )
+
+    if target_user.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="User is already active",
+        )
+
+    if verify_password(
+            payload.temporary_password,
+            target_user.password_hash,
+    ):
+        db.rollback()
+
+        raise HTTPException(
+            status_code=400,
+            detail="Temporary password must differ from previous password",
+        )
+
+    try:
+        target_user.password_hash = hash_password(
+            payload.temporary_password
+        )
+
+        target_user.is_active = True
+
+        target_user.must_change_password = True
+
+        target_user.token_version += 1
+
+        record_audit_event(
+            db,
+            action="USER_REACTIVATED",
             user_id=admin.id,
             ip_address=(
                 request.client.host
